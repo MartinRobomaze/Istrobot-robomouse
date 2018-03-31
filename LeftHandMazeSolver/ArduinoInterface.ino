@@ -1,12 +1,14 @@
 /*
  * This is program for motor control and sensor reading.
  * 
- * v0.1a - started developing ArduinoInterface class
- * v0.2a - finished developing ArduinoInterface class
- * v0.2b - tested motor driving - sucessful
- * v0.2b2 - tested encoders - sucessful
- * v0.2b3 - tested compass reading - sucessful
- * v0.2b4 - replace left and right functions with pointTo(speed, angle) and turn(speed, angle)
+ * v0.1a - finished developing ArduinoInterface class
+ * v0.1b - tested motor driving - sucessful
+ * v0.1b2 - tested encoders - sucessful
+ * v0.1b3 - tested compass reading - sucessful
+ * v0.1b4 - replace left and right functions with pointTo(speed, angle) and turn(speed, angle)
+ *          issue: compass reading is not good
+ * v0.2a1 - replacing compass with gyro + accelerometer MPU6050 - using Jeff Rowberg's library - link: https://github.com/jrowberg/i2cdevlib/tree/master/Arduino/MPU6050
+ * v0.2b1 - tested gyro absolutely sucessful
  * creator: MartinLinux
  */
 
@@ -16,9 +18,26 @@
 #include <Wire.h>
 //include encoder library
 #include <Encoder.h>
-//include compass library
-#include <MechaQMC5883.h>
+//include gyro libraries
+#include "I2Cdev.h"
+#include "MPU6050_6Axis_MotionApps20.h"
 
+MPU6050 mpu;
+
+const int interrupt = 2;  // use pin 2 on Arduino Uno & most boards
+bool blinkState = false;
+
+// MPU control/status vars
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+
+// orientation/motion vars
+Quaternion q;           // [w, x, y, z]         quaternion container
+float euler[3];         // [psi, theta, phi]    Euler angle container
 
 //defining pins for motor control
 const int motorAF = 5;
@@ -33,14 +52,35 @@ const int sensors[5] = {A0, A1, A2, A3, A4};
 Encoder rotationsA(2, 4);
 Encoder rotationsB(7, 3);
 
-//define object for compass reading
-MechaQMC5883 compass;
+
+volatile bool mpuInterrupt = false;
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
 
 
 //function for initialize components
 void begin() {
   Wire.begin();
-  compass.init();
+  mpu.initialize();
+  pinMode(interrupt, INPUT);
+  devStatus = mpu.dmpInitialize();
+
+  mpu.setXGyroOffset(220);
+  mpu.setYGyroOffset(76);
+  mpu.setZGyroOffset(-85);
+  mpu.setZAccelOffset(1788); 
+
+  if (devStatus == 0) {
+    mpu.setDMPEnabled(true);
+    attachInterrupt(digitalPinToInterrupt(interrupt), dmpDataReady, RISING);
+    mpuIntStatus = mpu.getIntStatus();
+    dmpReady = true;
+    packetSize = mpu.dmpGetFIFOPacketSize();
+  }
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  
   pinMode(motorAF, OUTPUT);
   pinMode(motorAB, OUTPUT);
   pinMode(motorBF, OUTPUT);
@@ -108,7 +148,7 @@ void pointTo(int speed, float angle) {
   int direction = angle;
   
   while(1) {
-    int currentAngle = readCompass();
+    int currentAngle = readAngle();
     int diff = target-currentAngle;
     direction = 180 - (diff + 360) % 360;
     
@@ -129,7 +169,7 @@ void pointTo(int speed, float angle) {
 
 
 void turn(int speed, int angle) {
-  int originalAngle = readCompass();
+  int originalAngle = readAngle();
   int target = originalAngle + angle;
 
   pointTo(speed, target);
@@ -216,26 +256,6 @@ int readIRSensor(int sensor) {
   return analogRead(sensors[sensor - 1]);
 }
 
-
-//function for reading compass
-int readCompass() {
-  int x, y, z;
-  compass.read(&x, &y, &z);
-  int heading = atan2(x, y);
-  heading += 0.0872665;
-
-  if(heading < 0) {
-    heading += 2*PI;
-  }  
-  if(heading > 2*PI) {
-    heading -= 2*PI;
-  } 
-  float headingDegrees = heading * 180/M_PI; 
-
-  return headingDegrees;
-}
-
-
 //function for reading rotary encoders
 float readEncoderPos(char sensor) {
   if (sensor == 'a' || sensor == 'A') {
@@ -247,5 +267,29 @@ float readEncoderPos(char sensor) {
   else {
     return -999999999999;
   }
+}
+
+//function for reading gyro
+int readAngle() {
+  if (!dmpReady) {return;}
+
+  mpuInterrupt = false;
+  mpuIntStatus = mpu.getIntStatus();
+
+  fifoCount = mpu.getFIFOCount();
+
+  if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+      mpu.resetFIFO();
+      Serial.println(F("FIFO overflow!"));
+  } else if (mpuIntStatus & 0x02) {
+    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+    mpu.getFIFOBytes(fifoBuffer, packetSize);    
+    fifoCount -= packetSize;
+
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetEuler(euler, &q);
+  }
+  return euler[0] * 180 / M_PI;
 }
 
