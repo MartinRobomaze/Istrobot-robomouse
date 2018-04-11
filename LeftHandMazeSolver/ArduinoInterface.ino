@@ -1,4 +1,4 @@
-/*
+/****
  * This is program for motor control and sensor reading.
  * 
  * v0.1a - finished developing ArduinoInterface class
@@ -8,7 +8,7 @@
  * v0.1b4 - replace left and right functions with pointTo(speed, angle) and turn(speed, angle)
  *          issue: compass reading is not good
  * v0.2a1 - replacing compass with gyro + accelerometer MPU6050 - using Jeff Rowberg's library - link: https://github.com/jrowberg/i2cdevlib/tree/master/Arduino/MPU6050
- * v0.2b1 - tested gyro absolutely sucessful
+ * v0.2b1 - tested gyro - absolutely sucessful
  * creator: MartinLinux
  */
 
@@ -18,117 +18,117 @@
 #include <Wire.h>
 //include encoder library
 #include <Encoder.h>
-//include gyro libraries
-#include "I2Cdev.h"
-#include "MPU6050_6Axis_MotionApps20.h"
+#include <math.h>
 
-MPU6050 mpu;
+float PR, DR, previousIrError;
+float PE, DE, previousEncError;
+const float kPR = 20, kDR = 10;
+const float kPE = 1, kDE = .5;
 
-const int interrupt = 2;  // use pin 2 on Arduino Uno & most boards
-bool blinkState = false;
-
-// MPU control/status vars
-bool dmpReady = false;  // set true if DMP init was successful
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-// orientation/motion vars
-Quaternion q;           // [w, x, y, z]         quaternion container
-float euler[3];         // [psi, theta, phi]    Euler angle container
+int encError = 0;
 
 //defining pins for motor control
-const int motorAF = 5;
-const int motorAB = 6;
-const int motorBF = 9;
-const int motorBB = 10;
+const int motorBF = 5;
+const int motorBB = 6;
+const int motorAF = 10;
+const int motorAB = 9;
 
 //defining pins for sensor reading
-const int sensors[5] = {A0, A1, A2, A3, A4};
+const int sensors[4] = {A0, A1, A2, A3};
 
 //defining pins for encoder reading
-Encoder rotationsA(2, 4);
-Encoder rotationsB(7, 3);
+Encoder rotationsB(2, 8);
+Encoder rotationsA(3, 12);
 
+float gyroZ;
 
-volatile bool mpuInterrupt = false;
-void dmpDataReady() {
-    mpuInterrupt = true;
-}
-
-
-//function for initialize components
+/**
+ * function for initialize components
+ */
 void begin() {
-  Wire.begin();
-  mpu.initialize();
-  pinMode(interrupt, INPUT);
-  devStatus = mpu.dmpInitialize();
-
-  mpu.setXGyroOffset(220);
-  mpu.setYGyroOffset(76);
-  mpu.setZGyroOffset(-85);
-  mpu.setZAccelOffset(1788); 
-
-  if (devStatus == 0) {
-    mpu.setDMPEnabled(true);
-    attachInterrupt(digitalPinToInterrupt(interrupt), dmpDataReady, RISING);
-    mpuIntStatus = mpu.getIntStatus();
-    dmpReady = true;
-    packetSize = mpu.dmpGetFIFOPacketSize();
-  }
-
-  pinMode(LED_BUILTIN, OUTPUT);
-  
+   Wire.beginTransmission(0b1101000); //This is the I2C address of the MPU (b1101000/b1101001 for AC0 low/high datasheet sec. 9.2)
+  Wire.write(0x6B); //Accessing the register 6B - Power Management (Sec. 4.28)
+  Wire.write(0b00000000); //Setting SLEEP register to 0. (Required; see Note on p. 9)
+  Wire.endTransmission();  
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x1B); //Accessing the register 1B - Gyroscope Configuration (Sec. 4.4) 
+  Wire.write(0x00000000); //Setting the gyro to full scale +/- 250deg./s 
+  Wire.endTransmission(); 
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x1C); //Accessing the register 1C - Acccelerometer Configuration (Sec. 4.5) 
+  Wire.write(0b00000000); //Setting the accel to +/- 2g
+  Wire.endTransmission(); 
   pinMode(motorAF, OUTPUT);
   pinMode(motorAB, OUTPUT);
   pinMode(motorBF, OUTPUT);
   pinMode(motorBB, OUTPUT);
 
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 4; i++) {
     pinMode(sensors[i], INPUT);
   }
 }
 
+/**
+ * function for going forward until you stop motors manually
+ */
+void forward() {
 
-//function for going forward for rotations
-void forward(int speed, float rotations) {
-  float posA = readEncoderPos('A');
-  float posB = readEncoderPos('B');
-  while (readEncoderPos('A') < posA + rotations && readEncoderPos('B') < rotations) {
-    analogWrite(motorAF, speed);
-    analogWrite(motorAB, 0);
-    analogWrite(motorBF, speed);
-    analogWrite(motorBB, 0);
+  float encPid = 0;
+  float speedA = getSpeed();
+  float speedB = getSpeed();
+
+  // The B encoder will return negative value so we have to 
+  // add the value.
+  encError = readEncoderPos('A') + readEncoderPos('B');
+  // To prevent incrementing we define encError as global and to get
+  // the current error value we discount the previous error value.
+  encError -= previousEncError;
+  
+  PE = encError;
+  DE = encError - previousEncError;
+
+  encPid = (PE * kPE) - (DE * kDE);
+  speedB += encPid;
+  previousEncError = encError;
+
+  Serial.print("A: ");
+  Serial.println(speedA);
+  Serial.print("B: ");
+  Serial.println(speedB);
+  
+  float targetLeftDistance = 1.2;
+  float irError = targetLeftDistance - readIRSensor(1);
+
+  PR = irError;
+  DR = irError - previousIrError;
+
+  previousIrError = irError;
+
+  float irPid = (PR * kPR) - (DR * kDR);
+  
+  moveTank(speedA - irPid, speedB + irPid);
+}
+
+/**
+ * go forward for given lenght.
+ */
+void forward(byte speed, float cm) {
+
+  float rotations = getRotationsFromCm(cm);
+  float startPos = readEncoderPos('A');
+    
+  do {
+    moveTank(speed, speed);
   }
+  while (readEncoderPos('A') < startPos + rotations);
+
   stop();
 }
 
-
-//function for going forward until you stop motors manually
-void forward(int speed) {
-  analogWrite(motorAF, speed);
-  analogWrite(motorAB, 0);
-  analogWrite(motorBF, speed);
-  analogWrite(motorBB, 0);
-}
-
-
-//function for going backward for rotations
-void back(int speed, float rotations) {
-  while (readEncoderPos('A') + rotations < rotations && readEncoderPos('B') + rotations < rotations) {
-    analogWrite(motorAF, 0);
-    analogWrite(motorAB, speed);
-    analogWrite(motorBF, 0);
-    analogWrite(motorBB, speed);
-  }
-  stop();
-}
-
-
-//function for going backward until you stop them manually
-void back(int speed) {
+/**
+ * function for going backward until you stop them manually
+ */
+void back(byte speed) {
   analogWrite(motorAF, 0);
   analogWrite(motorAB, speed);
   analogWrite(motorBF, 0);
@@ -137,47 +137,15 @@ void back(int speed) {
 
 
 //function to turn left/right after it will come to declared angle
-void pointTo(int speed, float angle) {
-  int target = angle;
-  target = target % 360;
-  
-  if(target < 0) {
-    target += 360;
-  }
-  
-  int direction = angle;
-  
-  while(1) {
-    int currentAngle = readAngle();
-    int diff = target-currentAngle;
-    direction = 180 - (diff + 360) % 360;
-    
-    if(direction > 0){
-      moveTank(speed, 0);
-      delay(10);
-    }else{
-      moveTank(0, speed);
-      delay(10);
-    }
-    
-    if(abs(diff) < 8){
-      stop();
-      return;
-    }
-  }
-}
 
 
-void turn(int speed, int angle) {
-  int originalAngle = readAngle();
-  int target = originalAngle + angle;
-
-  pointTo(speed, target);
-}
 
 
-//function for move robot like tank
-void moveTank(int speedA, int speedB) {
+/**
+ * function for move robot like tank
+ */
+void moveTank(byte speedA, byte speedB) {
+
   if (speedA > 0) {
     analogWrite(motorAF, speedA);
     analogWrite(motorAB, 0);
@@ -192,12 +160,12 @@ void moveTank(int speedA, int speedB) {
   }
  
   if (speedB > 0) {
-    analogWrite(motorBF, speedA);
+    analogWrite(motorBF, speedB);
     analogWrite(motorBB, 0);
   }
   else if (speedB < 0) {
     analogWrite(motorBF, 0);
-    analogWrite(motorBB, speedA);
+    analogWrite(motorBB, speedB);
   }
   else {
     analogWrite(motorBF, 0);
@@ -206,38 +174,39 @@ void moveTank(int speedA, int speedB) {
 }
 
 
-void moveTank(int speedA, int speedB, float rotations) {
-  while (readEncoderPos('a') + rotations < rotations && readEncoderPos('b') + rotations < rotations) {
-    if (speedA > 0) {
-      analogWrite(motorAF, speedA);
-      analogWrite(motorAB, 0);
+/**
+ * 
+ */
+
+void turn(byte speed, float angle) {
+  while (!hasTurned) {
+    float yaw = readAccel();
+  
+    if (targetAngle == 0) {
+      targetAngle = yaw + angle; 
     }
-    else if (speedA < 0) {
-      analogWrite(motorAF, 0);
-      analogWrite(motorAB, speedA);
+    
+    float diff = targetAngle - yaw;
+    Serial.println("diff");
+    Serial.println(diff);
+  
+    if (targetAngle < yaw) {
+      moveTank(speed, 0);
+    } else {
+      moveTank(0, speed);
     }
-    else {
-      analogWrite(motorAF, 0);
-      analogWrite(motorAB, 0);
-    }
-   
-    if (speedB > 0) {
-      analogWrite(motorBF, speedA);
-      analogWrite(motorBB, 0);
-    }
-    else if (speedB < 0) {
-      analogWrite(motorBF, 0);
-      analogWrite(motorBB, speedA);
-    }
-    else {
-      analogWrite(motorBF, 0);
-      analogWrite(motorBB, 0);
+  
+    if (abs(diff) < 8) {
+      hasTurned = true;
+      Serial.println("====================TURN DONE===================");
+      stop();
     }
   }
 }
 
-
-//function for stop motors
+/**
+ * function for stop motors
+ */
 void stop() {
   digitalWrite(motorAF, 1);
   digitalWrite(motorAB, 1);
@@ -250,46 +219,50 @@ void stop() {
   digitalWrite(motorBB, 0);
 }
 
-
-//function for reading IR sensors
-int readIRSensor(int sensor) {
-  return analogRead(sensors[sensor - 1]);
+/**
+ * reading gyro
+ */
+float readAccel() {
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x3B); //Starting register for Accel Readings
+  Wire.endTransmission();
+  Wire.requestFrom(0b1101000,6); //Request Accel Registers (3B - 40)
+  while(Wire.available() < 6);
+  int ax = Wire.read()<<8|Wire.read(); //Store first two bytes into accelX
+  int ay = Wire.read()<<8|Wire.read(); //Store middle two bytes into accelY
+  int az = Wire.read()<<8|Wire.read(); //Store last two bytes into accelZ
+  int accelX = ax * 3.9;
+  int accelZ = az * 3.9;
+  return ax / 182.04;
 }
 
-//function for reading rotary encoders
+/**
+ * function for reading IR sensors
+ */
+float readIRSensor(int sensor) {
+  return analogRead(sensors[sensor - 1]) * 5.0 / 1024.0;
+}
+
+/**
+ * function for reading rotary encoders
+ */
 float readEncoderPos(char sensor) {
-  if (sensor == 'a' || sensor == 'A') {
-    return rotationsA.read() / 30 / 7;
+  if (sensor == 'A') {
+    return rotationsA.read();
   }
-  else if (sensor == 'b' || sensor == 'B') {
-    return 0 - (rotationsB.read() / 30 / 7);
+  else if (sensor == 'B') {
+    return rotationsB.read();
   }
   else {
     return -999999999999;
   }
 }
 
-//function for reading gyro
-int readAngle() {
-  if (!dmpReady) {return;}
-
-  mpuInterrupt = false;
-  mpuIntStatus = mpu.getIntStatus();
-
-  fifoCount = mpu.getFIFOCount();
-
-  if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
-      mpu.resetFIFO();
-      Serial.println(F("FIFO overflow!"));
-  } else if (mpuIntStatus & 0x02) {
-    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
-
-    mpu.getFIFOBytes(fifoBuffer, packetSize);    
-    fifoCount -= packetSize;
-
-    mpu.dmpGetQuaternion(&q, fifoBuffer);
-    mpu.dmpGetEuler(euler, &q);
-  }
-  return euler[0] * 180 / M_PI;
+/**
+ * transforms centimeters to rotations
+ */
+float getRotationsFromCm(float cm) {
+  return (cm - 6) / (PI * 3);
 }
+
 
