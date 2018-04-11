@@ -14,18 +14,19 @@
 
 //include arduino library
 #include <Arduino.h>
-//include wire library for I2C communication with compass
-#include <Wire.h>
 //include encoder library
 #include <Encoder.h>
-#include <math.h>
+
 
 float PR, DR, previousIrError;
 float PE, DE, previousEncError;
+float PE2, DE2, previousEncError2;
+
 const float kPR = 20, kDR = 10;
 const float kPE = 1, kDE = .5;
 
 int encError = 0;
+int encError2;
 
 //defining pins for motor control
 const int motorBF = 5;
@@ -40,24 +41,10 @@ const int sensors[4] = {A0, A1, A2, A3};
 Encoder rotationsB(2, 8);
 Encoder rotationsA(3, 12);
 
-float gyroZ;
-
 /**
  * function for initialize components
  */
 void begin() {
-   Wire.beginTransmission(0b1101000); //This is the I2C address of the MPU (b1101000/b1101001 for AC0 low/high datasheet sec. 9.2)
-  Wire.write(0x6B); //Accessing the register 6B - Power Management (Sec. 4.28)
-  Wire.write(0b00000000); //Setting SLEEP register to 0. (Required; see Note on p. 9)
-  Wire.endTransmission();  
-  Wire.beginTransmission(0b1101000); //I2C address of the MPU
-  Wire.write(0x1B); //Accessing the register 1B - Gyroscope Configuration (Sec. 4.4) 
-  Wire.write(0x00000000); //Setting the gyro to full scale +/- 250deg./s 
-  Wire.endTransmission(); 
-  Wire.beginTransmission(0b1101000); //I2C address of the MPU
-  Wire.write(0x1C); //Accessing the register 1C - Acccelerometer Configuration (Sec. 4.5) 
-  Wire.write(0b00000000); //Setting the accel to +/- 2g
-  Wire.endTransmission(); 
   pinMode(motorAF, OUTPUT);
   pinMode(motorAB, OUTPUT);
   pinMode(motorBF, OUTPUT);
@@ -73,56 +60,48 @@ void begin() {
  */
 void forward() {
 
-  float encPid = 0;
   float speedA = getSpeed();
   float speedB = getSpeed();
 
-  // The B encoder will return negative value so we have to 
-  // add the value.
-  encError = readEncoderPos('A') + readEncoderPos('B');
-  // To prevent incrementing we define encError as global and to get
-  // the current error value we discount the previous error value.
-  encError -= previousEncError;
+  if (readIRSensor(1) > 0.8 && readIRSensor(3) > 0.8) {
+    float irError = readIRSensor(1) - readIRSensor(3);
   
-  PE = encError;
-  DE = encError - previousEncError;
-
-  encPid = (PE * kPE) - (DE * kDE);
-  speedB += encPid;
-  previousEncError = encError;
-
-  Serial.print("A: ");
-  Serial.println(speedA);
-  Serial.print("B: ");
-  Serial.println(speedB);
+    PR = irError;
+    DR = irError - previousIrError;
   
-  float targetLeftDistance = 1.2;
-  float irError = targetLeftDistance - readIRSensor(1);
-
-  PR = irError;
-  DR = irError - previousIrError;
-
-  previousIrError = irError;
-
-  float irPid = (PR * kPR) - (DR * kDR);
+    previousIrError = irError;
   
-  moveTank(speedA - irPid, speedB + irPid);
-}
+    float irPid = (PR * kPR) - (DR * kDR);
 
-/**
- * go forward for given lenght.
- */
-void forward(byte speed, float cm) {
+    speedA = speedA + irPid;
+    speedB = speedB - irPid;
 
-  float rotations = getRotationsFromCm(cm);
-  float startPos = readEncoderPos('A');
-    
-  do {
-    moveTank(speed, speed);
+    Serial.print("PID: ");
+    Serial.println(irPid);
+    Serial.print("A: ");
+    Serial.println(speedA);
+    Serial.print("B: ");
+    Serial.println(speedB);
   }
-  while (readEncoderPos('A') < startPos + rotations);
+  else {
+    float encPid = 0;
+  
+    // The B encoder will return negative value so we have to 
+    // add the value.
+    encError = readEncoderPos('A') + readEncoderPos('B');
+    // To prevent incrementing we define encError as global and to get
+    // the current error value we discount the previous error value.
+    encError -= previousEncError;
+    
+    PE = encError;
+    DE = encError - previousEncError;
+  
+    encPid = (PE * kPE) - (DE * kDE);
+    speedB += encPid;
+    previousEncError = encError;
+  }
 
-  stop();
+  moveTank(speedA, speedB);
 }
 
 /**
@@ -135,16 +114,10 @@ void back(byte speed) {
   analogWrite(motorBB, speed);
 }
 
-
-//function to turn left/right after it will come to declared angle
-
-
-
-
 /**
  * function for move robot like tank
  */
-void moveTank(byte speedA, byte speedB) {
+void moveTank(int speedA, int speedB) {
 
   if (speedA > 0) {
     analogWrite(motorAF, speedA);
@@ -173,39 +146,35 @@ void moveTank(byte speedA, byte speedB) {
   }
 }
 
-
 /**
- * 
+ * turn left/right
  */
-
-void turn(byte speed, float angle) {
-  while (!hasTurned) {
-    float yaw = readAccel();
+void turn(float angle) {
+  int originalPosA = readEncoderPos('A');
+  int originalPosB = readEncoderPos('B');
   
-    if (targetAngle == 0) {
-      targetAngle = yaw + angle; 
+  if (angle == 90) {
+    int compensation = getSpeed() < 200 ? 80 : 230;
+    while (readEncoderPos('A') - originalPosA < 441 - compensation) {
+      moveTank(getSpeed() + 20, 0);
+      Serial.println(readEncoderPos('A'));
     }
     
-    float diff = targetAngle - yaw;
-    Serial.println("diff");
-    Serial.println(diff);
-  
-    if (targetAngle < yaw) {
-      moveTank(speed, 0);
-    } else {
-      moveTank(0, speed);
+    stop();
+  } else if (angle == -90) {
+    int compensation = getSpeed() < 200 ? 140 : 200;
+    while (readEncoderPos('B') + 20 - originalPosB > -441 + compensation) {
+      moveTank(0, getSpeed);
     }
-  
-    if (abs(diff) < 8) {
-      hasTurned = true;
-      Serial.println("====================TURN DONE===================");
-      stop();
-    }
+    
+    stop();
   }
+  rotationsA.write(0);
+  rotationsB.write(0);
 }
 
 /**
- * function for stop motors
+ * stop motors
  */
 void stop() {
   digitalWrite(motorAF, 1);
@@ -220,31 +189,14 @@ void stop() {
 }
 
 /**
- * reading gyro
- */
-float readAccel() {
-  Wire.beginTransmission(0b1101000); //I2C address of the MPU
-  Wire.write(0x3B); //Starting register for Accel Readings
-  Wire.endTransmission();
-  Wire.requestFrom(0b1101000,6); //Request Accel Registers (3B - 40)
-  while(Wire.available() < 6);
-  int ax = Wire.read()<<8|Wire.read(); //Store first two bytes into accelX
-  int ay = Wire.read()<<8|Wire.read(); //Store middle two bytes into accelY
-  int az = Wire.read()<<8|Wire.read(); //Store last two bytes into accelZ
-  int accelX = ax * 3.9;
-  int accelZ = az * 3.9;
-  return ax / 182.04;
-}
-
-/**
- * function for reading IR sensors
+ * reading IR sensors
  */
 float readIRSensor(int sensor) {
   return analogRead(sensors[sensor - 1]) * 5.0 / 1024.0;
 }
 
 /**
- * function for reading rotary encoders
+ * reading rotary encoders
  */
 float readEncoderPos(char sensor) {
   if (sensor == 'A') {

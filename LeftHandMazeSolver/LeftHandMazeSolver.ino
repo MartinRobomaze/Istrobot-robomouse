@@ -11,7 +11,7 @@
 //byte pathIndex = 0;
 //byte readIndex = 0;
 
-const byte baseSpeed = 80;
+const byte baseSpeed = 60;
 
 bool hasTurned = false;
 
@@ -29,57 +29,21 @@ void setup() {
   delay(1000);
 }
 
-void loop() {  
-  if (readIRSensor(2) < 0.8) {
+void loop() {
+  if (readIRSensor(2) < 0.6) {
     forward();
   } else {
+    stop();
+    forward();
+    delay(50);
+    stop();
+    turn(90);
+    forward();
+    delay(50);
     stop();
   }
 }
 
-//bool turn(byte speed, int angle) {
-//
-//  int target = 0;
-//
-//  while (1) {
-//
-//    timer = millis();
-//
-//    // Read normalized values
-//    Vector norm = mpu.readNormalizeGyro();
-//  
-//    // Calculate Pitch, Roll and Yaw
-//    yaw = yaw + norm.ZAxis * timeStep;
-//
-//    // Wait to full timeStep period
-//    delay((timeStep*1000) - (millis() - timer));
-//
-//    Serial.println("Current angle");
-//    Serial.println(yaw);
-//
-//    if (target == 0) {
-//      target = yaw + angle; 
-//    }
-//
-//    float diff = target - yaw;
-//    Serial.println("diff");
-//    Serial.println(diff);
-//
-//    if (target < yaw) {
-//      moveTank(speed, 0);
-//    } else {
-//      moveTank(0, speed);
-//    }
-//
-//    if (abs(diff) < 8) {
-//      Serial.println("====================TURN DONE===================");
-//      stop();
-//      return true;
-//    }
-//  }
-//}
-//
-//
 //void leftHandMazeSolve() {
 //  if (readIRSensor(1) < 0.8) {
 //    stop();
